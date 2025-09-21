@@ -48,14 +48,13 @@ func NewServer(cfg config.Config, pool *db.Pool, fileSvc *files.Service, oauth *
 	router.Use(middleware.Logger)
 	router.Use(middleware.Recoverer)
 
-	corsOrigins := []string{cfg.FrontendURL}
-	if cfg.FrontendURL == "" {
-		corsOrigins = []string{"http://localhost:3000"}
+	origin := strings.TrimSuffix(cfg.FrontendURL, "/")
+	if origin == "" {
+		origin = "http://localhost:3000"
 	}
-
 	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   corsOrigins,
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedOrigins:   []string{origin},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Authorization", "Content-Type"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -172,15 +171,8 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.cfg.SessionCookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   s.secureCookie,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  claims.ExpiresAt.Time,
-	})
+	// Cross-site (Vercel -> Railway) requires SameSite=None; Secure and works best with Partitioned (CHIPS)
+	s.setSessionCookie(w, s.cfg.SessionCookieName, token, claims.ExpiresAt.Time)
 
 	s.clearStateCookie(w)
 
@@ -489,4 +481,40 @@ func (s *Server) writeJSON(w http.ResponseWriter, code int, payload any) {
 func (s *Server) Start() error {
 	addr := fmt.Sprintf(":%s", s.cfg.Port)
 	return http.ListenAndServe(addr, s.router)
+}
+
+// setSessionCookie writes the session cookie with attributes suitable for cross-site usage.
+// If the frontend is HTTPS (s.secureCookie), we set SameSite=None; Secure and add the Partitioned attribute (CHIPS)
+// to improve compatibility when third-party cookies are restricted by the browser.
+func (s *Server) setSessionCookie(w http.ResponseWriter, name, value string, expires time.Time) {
+	// Default to Lax for same-site local development
+	sameSite := http.SameSiteLaxMode
+	if s.secureCookie {
+		sameSite = http.SameSiteNoneMode
+	}
+
+	// Attempt to use net/http Cookie first
+	base := &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.secureCookie,
+		SameSite: sameSite,
+		Expires:  expires,
+	}
+
+	// Write base cookie
+	http.SetCookie(w, base)
+
+	// Add Partitioned attribute for CHIPS, if serving over HTTPS.
+	// Older Go versions don't have Cookie.Partitioned; appending a second header with the attribute works.
+	if s.secureCookie {
+		// Rebuild cookie string to append "; Partitioned" once.
+		// Format time as per RFC1123 with GMT timezone.
+		expiresStr := expires.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
+		// Note: Do not set Domain so the cookie is host-only for the backend host.
+		cookieStr := fmt.Sprintf("%s=%s; Path=/; Expires=%s; HttpOnly; Secure; SameSite=None; Partitioned", name, value, expiresStr)
+		w.Header().Add("Set-Cookie", cookieStr)
+	}
 }
