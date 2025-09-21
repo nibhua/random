@@ -126,14 +126,14 @@ func (s *Server) handleGoogleStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     s.stateCookie,
-		Value:    state,
-		Path:     "/auth/google",
-		HttpOnly: true,
-		Secure:   s.secureCookie,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(5 * time.Minute),
-	})
+    Name:     s.cfg.SessionCookieName, // e.g., "vault_session"
+    Value:    token,                   // your session/JWT value
+    Path:     "/",
+    HttpOnly: true,
+    Secure:   true,                    // required for cross-site cookies
+    SameSite: http.SameSiteNoneMode,   // required for cross-site cookies
+    Expires:  claims.ExpiresAt.Time,   // or time.Now().Add(24*time.Hour)
+})
 
 	authURL := s.oauth.AuthCodeURL(state)
 	http.Redirect(w, r, authURL, http.StatusFound)
